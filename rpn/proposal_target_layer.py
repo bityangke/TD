@@ -3,15 +3,17 @@
 # Copyright (c) 2015 Microsoft
 # Licensed under The MIT License [see LICENSE for details]
 # Written by Ross Girshick and Sean Bell
+# TD-CNN
+# Modified by Huijuan Xu
 # --------------------------------------------------------
 
 import caffe
 import yaml
 import numpy as np
 import numpy.random as npr
-from fast_rcnn.config import cfg
-from fast_rcnn.bbox_transform import bbox_transform
-from utils.cython_bbox import bbox_overlaps
+from tdcnn.config import cfg
+from tdcnn.twin_transform import twin_transform
+from utils.cython_twin import twin_overlaps
 
 DEBUG = False
 
@@ -25,30 +27,30 @@ class ProposalTargetLayer(caffe.Layer):
         layer_params = yaml.load(self.param_str_)
         self._num_classes = layer_params['num_classes']
 
-        # sampled rois (0, x1, y1, x2, y2)
-        top[0].reshape(1, 5)
+        # sampled rois (0, x1, x2)
+        top[0].reshape(1, 3)
         # labels
         top[1].reshape(1, 1)
-        # bbox_targets
-        top[2].reshape(1, self._num_classes * 4)
-        # bbox_inside_weights
-        top[3].reshape(1, self._num_classes * 4)
-        # bbox_outside_weights
-        top[4].reshape(1, self._num_classes * 4)
+        # twin_targets
+        top[2].reshape(1, self._num_classes * 2)
+        # twin_inside_weights
+        top[3].reshape(1, self._num_classes * 2)
+        # twin_outside_weights
+        top[4].reshape(1, self._num_classes * 2)
 
     def forward(self, bottom, top):
-        # Proposal ROIs (0, x1, y1, x2, y2) coming from RPN
+        # Proposal ROIs (0, x1, x2) coming from RPN
         # (i.e., rpn.proposal_layer.ProposalLayer), or any other source
         all_rois = bottom[0].data
-        # GT boxes (x1, y1, x2, y2, label)
+        # GT wins (x1, x2, label)
         # TODO(rbg): it's annoying that sometimes I have extra info before
         # and other times after box coordinates -- normalize to one format
-        gt_boxes = bottom[1].data
+        gt_wins = bottom[1].data
 
-        # Include ground-truth boxes in the set of candidate rois
-        zeros = np.zeros((gt_boxes.shape[0], 1), dtype=gt_boxes.dtype)
+        # Include ground-truth wins in the set of candidate rois
+        zeros = np.zeros((gt_wins.shape[0], 1), dtype=gt_wins.dtype)
         all_rois = np.vstack(
-            (all_rois, np.hstack((zeros, gt_boxes[:, :-1])))
+            (all_rois, np.hstack((zeros, gt_wins[:, :-1])))
         )
 
         # Sanity check: single batch only
@@ -61,8 +63,8 @@ class ProposalTargetLayer(caffe.Layer):
 
         # Sample rois with classification labels and bounding box regression
         # targets
-        labels, rois, bbox_targets, bbox_inside_weights = _sample_rois(
-            all_rois, gt_boxes, fg_rois_per_image,
+        labels, rois, twin_targets, twin_inside_weights = _sample_rois(
+            all_rois, gt_wins, fg_rois_per_image,
             rois_per_image, self._num_classes)
 
         if DEBUG:
@@ -83,17 +85,17 @@ class ProposalTargetLayer(caffe.Layer):
         top[1].reshape(*labels.shape)
         top[1].data[...] = labels
 
-        # bbox_targets
-        top[2].reshape(*bbox_targets.shape)
-        top[2].data[...] = bbox_targets
+        # twin_targets
+        top[2].reshape(*twin_targets.shape)
+        top[2].data[...] = twin_targets
 
-        # bbox_inside_weights
-        top[3].reshape(*bbox_inside_weights.shape)
-        top[3].data[...] = bbox_inside_weights
+        # twin_inside_weights
+        top[3].reshape(*twin_inside_weights.shape)
+        top[3].data[...] = twin_inside_weights
 
-        # bbox_outside_weights
-        top[4].reshape(*bbox_inside_weights.shape)
-        top[4].data[...] = np.array(bbox_inside_weights > 0).astype(np.float32)
+        # twin_outside_weights
+        top[4].reshape(*twin_inside_weights.shape)
+        top[4].data[...] = np.array(twin_inside_weights > 0).astype(np.float32)
 
     def backward(self, top, propagate_down, bottom):
         """This layer does not propagate gradients."""
@@ -104,39 +106,39 @@ class ProposalTargetLayer(caffe.Layer):
         pass
 
 
-def _get_bbox_regression_labels(bbox_target_data, num_classes):
-    """Bounding-box regression targets (bbox_target_data) are stored in a
-    compact form N x (class, tx, ty, tw, th)
+def _get_twin_regression_labels(twin_target_data, num_classes):
+    """Bounding-box regression targets (twin_target_data) are stored in a
+    compact form N x (class, tx, tl)
 
-    This function expands those targets into the 4-of-4*K representation used
+    This function expands those targets into the 4-of-2*K representation used
     by the network (i.e. only one class has non-zero targets).
 
     Returns:
-        bbox_target (ndarray): N x 4K blob of regression targets
-        bbox_inside_weights (ndarray): N x 4K blob of loss weights
+        twin_target (ndarray): N x 4K blob of regression targets
+        twin_inside_weights (ndarray): N x 4K blob of loss weights
     """
 
-    clss = bbox_target_data[:, 0]
-    bbox_targets = np.zeros((clss.size, 4 * num_classes), dtype=np.float32)
-    bbox_inside_weights = np.zeros(bbox_targets.shape, dtype=np.float32)
+    clss = twin_target_data[:, 0]
+    twin_targets = np.zeros((clss.size, w * num_classes), dtype=np.float32)
+    twin_inside_weights = np.zeros(twin_targets.shape, dtype=np.float32)
     inds = np.where(clss > 0)[0]
     for ind in inds:
         cls = clss[ind]
-        start = 4 * cls
-        end = start + 4
-        bbox_targets[ind, start:end] = bbox_target_data[ind, 1:]
-        bbox_inside_weights[ind, start:end] = cfg.TRAIN.BBOX_INSIDE_WEIGHTS
-    return bbox_targets, bbox_inside_weights
+        start = 2 * cls
+        end = start + 2
+        twin_targets[ind, start:end] = twin_target_data[ind, 1:]
+        twin_inside_weights[ind, start:end] = cfg.TRAIN.BBOX_INSIDE_WEIGHTS
+    return twin_targets, twin_inside_weights
 
 
 def _compute_targets(ex_rois, gt_rois, labels):
     """Compute bounding-box regression targets for an image."""
 
     assert ex_rois.shape[0] == gt_rois.shape[0]
-    assert ex_rois.shape[1] == 4
-    assert gt_rois.shape[1] == 4
+    assert ex_rois.shape[1] == 2
+    assert gt_rois.shape[1] == 2
 
-    targets = bbox_transform(ex_rois, gt_rois)
+    targets = twin_transform(ex_rois, gt_rois)
     if cfg.TRAIN.BBOX_NORMALIZE_TARGETS_PRECOMPUTED:
         # Optionally normalize targets by a precomputed mean and stdev
         targets = ((targets - np.array(cfg.TRAIN.BBOX_NORMALIZE_MEANS))
@@ -144,17 +146,17 @@ def _compute_targets(ex_rois, gt_rois, labels):
     return np.hstack(
             (labels[:, np.newaxis], targets)).astype(np.float32, copy=False)
 
-def _sample_rois(all_rois, gt_boxes, fg_rois_per_image, rois_per_image, num_classes):
+def _sample_rois(all_rois, gt_wins, fg_rois_per_image, rois_per_image, num_classes):
     """Generate a random sample of RoIs comprising foreground and background
     examples.
     """
-    # overlaps: (rois x gt_boxes)
-    overlaps = bbox_overlaps(
-        np.ascontiguousarray(all_rois[:, 1:5], dtype=np.float),
-        np.ascontiguousarray(gt_boxes[:, :4], dtype=np.float))
+    # overlaps: (rois x gt_wins)
+    overlaps = twin_overlaps(
+        np.ascontiguousarray(all_rois[:, 1:3], dtype=np.float),
+        np.ascontiguousarray(gt_wins[:, :2], dtype=np.float))
     gt_assignment = overlaps.argmax(axis=1)
     max_overlaps = overlaps.max(axis=1)
-    labels = gt_boxes[gt_assignment, 4]
+    labels = gt_wins[gt_assignment, 2]
 
     # Select foreground RoIs as those with >= FG_THRESH overlap
     fg_inds = np.where(max_overlaps >= cfg.TRAIN.FG_THRESH)[0]
@@ -184,10 +186,10 @@ def _sample_rois(all_rois, gt_boxes, fg_rois_per_image, rois_per_image, num_clas
     labels[fg_rois_per_this_image:] = 0
     rois = all_rois[keep_inds]
 
-    bbox_target_data = _compute_targets(
-        rois[:, 1:5], gt_boxes[gt_assignment[keep_inds], :4], labels)
+    twin_target_data = _compute_targets(
+        rois[:, 1:3], gt_wins[gt_assignment[keep_inds], :2], labels)
 
-    bbox_targets, bbox_inside_weights = \
-        _get_bbox_regression_labels(bbox_target_data, num_classes)
+    twin_targets, twin_inside_weights = \
+        _get_twin_regression_labels(twin_target_data, num_classes)
 
-    return labels, rois, bbox_targets, bbox_inside_weights
+    return labels, rois, twin_targets, twin_inside_weights
