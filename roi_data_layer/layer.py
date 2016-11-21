@@ -3,6 +3,8 @@
 # Copyright (c) 2015 Microsoft
 # Licensed under The MIT License [see LICENSE for details]
 # Written by Ross Girshick
+# TD-CNN
+# Modified by Huijuan Xu
 # --------------------------------------------------------
 
 """The data layer used during training to train a TD-CNN network.
@@ -41,7 +43,7 @@ class RoIDataLayer(caffe.Layer):
         separate process and made available through self._blob_queue.
         """
         if cfg.TRAIN.USE_PREFETCH:
-            assert not cfg.TRAIN.USE_PREFETCH, "Not Implement Yet"
+            raise NotImplementedError
 #            return self._blob_queue.get()
         else:
             db_inds = self._get_next_minibatch_inds()
@@ -53,7 +55,7 @@ class RoIDataLayer(caffe.Layer):
         self._roidb = roidb
         self._shuffle_roidb_inds()
         if cfg.TRAIN.USE_PREFETCH:
-             assert not cfg.TRAIN.USE_PREFETCH, "Not Implement Yet"
+            raise NotImplementedError
 #            self._blob_queue = Queue(10)
 #            self._prefetch_process = BlobFetcher(self._blob_queue,
 #                                                 self._roidb,
@@ -87,7 +89,7 @@ class RoIDataLayer(caffe.Layer):
             self._name_to_top_map['gt_windows'] = idx
             idx += 1
         else: # not using RPN
-            assert not cfg.TRAIN.HAS_RPN,  "Not Implement Yet"
+            raise NotImplementedError
 #            # rois blob: holds R regions of interest, each is a 5-tuple
 #            # (n, x1, y1, x2, y2) specifying an image batch index n and a
 #            # rectangle (x1, y1, x2, y2)

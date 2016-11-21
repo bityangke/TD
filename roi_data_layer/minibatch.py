@@ -3,6 +3,8 @@
 # Copyright (c) 2015 Microsoft
 # Licensed under The MIT License [see LICENSE for details]
 # Written by Ross Girshick
+# TD-CNN
+# Modified by Huijuan Xu
 # --------------------------------------------------------
 
 """Compute minibatch blobs for training a Fast R-CNN network."""
@@ -40,7 +42,7 @@ def get_minibatch(roidb, num_classes):
         gt_windows[:, -1] = roidb[0]['gt_classes'][gt_inds]
         blobs['gt_windows'] = gt_windows
     else: # not using RPN
-        assert not cfg.TRAIN.HAS_RPN, "Not Implement Yet"
+        raise NotImplementedError
 #        # Now, build the region of interest and label blobs
 #        rois_blob = np.zeros((0, 5), dtype=np.float32)
 #        labels_blob = np.zeros((0), dtype=np.float32)
