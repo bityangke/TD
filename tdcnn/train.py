@@ -7,7 +7,7 @@
 # Modified by Huijuan Xu
 # --------------------------------------------------------
 
-"""Train a Fast R-CNN network."""
+"""Train a TD-CNN network."""
 
 import caffe
 from tdcnn.config import cfg
