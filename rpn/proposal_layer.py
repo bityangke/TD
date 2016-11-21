@@ -3,27 +3,29 @@
 # Copyright (c) 2015 Microsoft
 # Licensed under The MIT License [see LICENSE for details]
 # Written by Ross Girshick and Sean Bell
+# TD-CNN
+# Modified by Huijuan Xu
 # --------------------------------------------------------
 
 import caffe
 import numpy as np
 import yaml
-from fast_rcnn.config import cfg
+from tdcnn.config import cfg
 from generate_anchors import generate_anchors
-from fast_rcnn.bbox_transform import bbox_transform_inv, clip_boxes
-from fast_rcnn.nms_wrapper import nms
+from tdcnn.twin_transform import twin_transform_inv, clip_wins
+from tdcnn.nms_wrapper import nms
 
 DEBUG = False
 
 class ProposalLayer(caffe.Layer):
     """
     Outputs object detection proposals by applying estimated bounding-box
-    transformations to a set of regular boxes (called "anchors").
+    transformations to a set of regular wins (called "anchors").
     """
 
     def setup(self, bottom, top):
         # parse the layer parameter string, which must be valid YAML
-        layer_params = yaml.load(self.param_str_)
+        layer_params = yaml.load(self.param_str)
 
         self._feat_stride = layer_params['feat_stride']
         anchor_scales = layer_params.get('scales', (8, 16, 32))
@@ -35,23 +37,23 @@ class ProposalLayer(caffe.Layer):
             print 'anchors:'
             print self._anchors
 
-        # rois blob: holds R regions of interest, each is a 5-tuple
-        # (n, x1, y1, x2, y2) specifying an image batch index n and a
-        # rectangle (x1, y1, x2, y2)
-        top[0].reshape(1, 5)
+        # rois blob: holds R regions of interest, each is a 3-tuple
+        # (n, x1, x2) specifying an video batch index n and a
+        # rectangle (x1, x2)
+        top[0].reshape(1, 3)
 
         # scores blob: holds scores for R regions of interest
         if len(top) > 1:
-            top[1].reshape(1, 1, 1, 1)
+            top[1].reshape(1, 1, 1, 1, 1)
 
     def forward(self, bottom, top):
         # Algorithm:
         #
         # for each (H, W) location i
-        #   generate A anchor boxes centered on cell i
-        #   apply predicted bbox deltas at cell i to each of the A anchors
-        # clip predicted boxes to image
-        # remove predicted boxes with either height or width < threshold
+        #   generate A anchor wins centered on cell i
+        #   apply predicted twin deltas at cell i to each of the A anchors
+        # clip predicted wins to video
+        # remove predicted wins with length < threshold
         # sort all (proposal, score) pairs by score from highest to lowest
         # take top pre_nms_topN proposals before NMS
         # apply NMS with threshold 0.7 to remaining proposals
@@ -70,63 +72,59 @@ class ProposalLayer(caffe.Layer):
         # the first set of _num_anchors channels are bg probs
         # the second set are the fg probs, which we want
         scores = bottom[0].data[:, self._num_anchors:, :, :]
-        bbox_deltas = bottom[1].data
+        twin_deltas = bottom[1].data
         im_info = bottom[2].data[0, :]
 
         if DEBUG:
             print 'im_size: ({}, {})'.format(im_info[0], im_info[1])
             print 'scale: {}'.format(im_info[2])
 
-        # 1. Generate proposals from bbox deltas and shifted anchors
-        height, width = scores.shape[-2:]
+        # 1. Generate proposals from twin deltas and shifted anchors
+        length, height, width = scores.shape[-3:]
 
         if DEBUG:
             print 'score map size: {}'.format(scores.shape)
 
         # Enumerate all shifts
-        shift_x = np.arange(0, width) * self._feat_stride
-        shift_y = np.arange(0, height) * self._feat_stride
-        shift_x, shift_y = np.meshgrid(shift_x, shift_y)
-        shifts = np.vstack((shift_x.ravel(), shift_y.ravel(),
-                            shift_x.ravel(), shift_y.ravel())).transpose()
+        shifts = np.arange(0, width) * self._feat_stride
 
         # Enumerate all shifted anchors:
         #
-        # add A anchors (1, A, 4) to
-        # cell K shifts (K, 1, 4) to get
-        # shift anchors (K, A, 4)
-        # reshape to (K*A, 4) shifted anchors
+        # add A anchors (1, A, 2) to
+        # cell K shifts (K, 1, 2) to get
+        # shift anchors (K, A, 2)
+        # reshape to (K*A, 2) shifted anchors
         A = self._num_anchors
         K = shifts.shape[0]
-        anchors = self._anchors.reshape((1, A, 4)) + \
-                  shifts.reshape((1, K, 4)).transpose((1, 0, 2))
-        anchors = anchors.reshape((K * A, 4))
+        anchors = self._anchors.reshape((1, A, 2)) + \
+                  shifts.reshape((1, K, 2)).transpose((1, 0, 2))
+        anchors = anchors.reshape((K * A, 2))
 
-        # Transpose and reshape predicted bbox transformations to get them
+        # Transpose and reshape predicted twin transformations to get them
         # into the same order as the anchors:
         #
-        # bbox deltas will be (1, 4 * A, H, W) format
-        # transpose to (1, H, W, 4 * A)
-        # reshape to (1 * H * W * A, 4) where rows are ordered by (h, w, a)
+        # twin deltas will be (1, 2 * A, L, H, W) format
+        # transpose to (1, L, H, W, 2 * A)
+        # reshape to (1 * L * H * W * A, 2) where rows are ordered by (l, h, w, a)
         # in slowest to fastest order
-        bbox_deltas = bbox_deltas.transpose((0, 2, 3, 1)).reshape((-1, 4))
+        twin_deltas = twin_deltas.transpose((0, 2, 3, 4, 1)).reshape((-1, 2))
 
         # Same story for the scores:
         #
-        # scores are (1, A, H, W) format
-        # transpose to (1, H, W, A)
-        # reshape to (1 * H * W * A, 1) where rows are ordered by (h, w, a)
-        scores = scores.transpose((0, 2, 3, 1)).reshape((-1, 1))
+        # scores are (1, A, L, H, W) format
+        # transpose to (1, L, H, W, A)
+        # reshape to (1 * L, H * W * A, 1) where rows are ordered by (l, h, w, a)
+        scores = scores.transpose((0, 2, 3, 4, 1)).reshape((-1, 1))
 
-        # Convert anchors into proposals via bbox transformations
-        proposals = bbox_transform_inv(anchors, bbox_deltas)
+        # Convert anchors into proposals via twin transformations
+        proposals = twin_transform_inv(anchors, twin_deltas)
 
-        # 2. clip predicted boxes to image
-        proposals = clip_boxes(proposals, im_info[:2])
+        # 2. clip predicted wins to video
+        proposals = clip_wins(proposals, length)
 
-        # 3. remove predicted boxes with either height or width < threshold
-        # (NOTE: convert min_size to input image scale stored in im_info[2])
-        keep = _filter_boxes(proposals, min_size * im_info[2])
+        # 3. remove predicted wins with either height or width < threshold
+        # (NOTE: convert min_size to input video scale stored in im_info[2])
+        keep = _filter_wins(proposals, min_size)
         proposals = proposals[keep, :]
         scores = scores[keep]
 
@@ -148,7 +146,7 @@ class ProposalLayer(caffe.Layer):
         scores = scores[keep]
 
         # Output rois blob
-        # Our RPN implementation only supports a single input image, so all
+        # Our RPN implementation only supports a single input video, so all
         # batch inds are 0
         batch_inds = np.zeros((proposals.shape[0], 1), dtype=np.float32)
         blob = np.hstack((batch_inds, proposals.astype(np.float32, copy=False)))
@@ -168,9 +166,8 @@ class ProposalLayer(caffe.Layer):
         """Reshaping happens during the call to forward."""
         pass
 
-def _filter_boxes(boxes, min_size):
-    """Remove all boxes with any side smaller than min_size."""
-    ws = boxes[:, 2] - boxes[:, 0] + 1
-    hs = boxes[:, 3] - boxes[:, 1] + 1
-    keep = np.where((ws >= min_size) & (hs >= min_size))[0]
+def _filter_wins(wins, min_size):
+    """Remove all wins with any side smaller than min_size."""
+    ls = wins[:, 1] - wins[:, 0] + 1
+    keep = np.where(ls >= min_size)[0]
     return keep
