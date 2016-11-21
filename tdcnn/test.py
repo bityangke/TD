@@ -3,18 +3,20 @@
 # Copyright (c) 2015 Microsoft
 # Licensed under The MIT License [see LICENSE for details]
 # Written by Ross Girshick
+# TD-CNN
+# Modified by Huijuan Xu
 # --------------------------------------------------------
 
-"""Test a Fast R-CNN network on an imdb (image database)."""
+"""Test a TD-CNN network."""
 
-from fast_rcnn.config import cfg, get_output_dir
-from fast_rcnn.bbox_transform import clip_boxes, bbox_transform_inv
+from tdcnn.config import cfg, get_output_dir
+from tdcnn.twin_transform import clip_wins, twin_transform_inv
 import argparse
 from utils.timer import Timer
 import numpy as np
 import cv2
 import caffe
-from fast_rcnn.nms_wrapper import nms
+from tdcnn.nms_wrapper import nms
 import cPickle
 from utils.blob import im_list_to_blob
 import os
@@ -59,11 +61,11 @@ def _get_rois_blob(im_rois, im_scale_factors):
     """Converts RoIs into network inputs.
 
     Arguments:
-        im_rois (ndarray): R x 4 matrix of RoIs in original image coordinates
+        im_rois (ndarray): R x 2 matrix of RoIs in original image coordinates
         im_scale_factors (list): scale factors as returned by _get_image_blob
 
     Returns:
-        blob (ndarray): R x 5 matrix of RoIs in the image pyramid
+        blob (ndarray): R x 3 matrix of RoIs in the image pyramid
     """
     rois, levels = _project_im_rois(im_rois, im_scale_factors)
     rois_blob = np.hstack((levels, rois))
@@ -73,11 +75,11 @@ def _project_im_rois(im_rois, scales):
     """Project image RoIs into the image pyramid built by _get_image_blob.
 
     Arguments:
-        im_rois (ndarray): R x 4 matrix of RoIs in original image coordinates
+        im_rois (ndarray): R x 2 matrix of RoIs in original image coordinates
         scales (list): scale factors as returned by _get_image_blob
 
     Returns:
-        rois (ndarray): R x 4 matrix of projected RoI coordinates
+        rois (ndarray): R x 2 matrix of projected RoI coordinates
         levels (list): image pyramid levels used by each projected RoI
     """
     im_rois = im_rois.astype(np.float, copy=False)
@@ -105,20 +107,20 @@ def _get_blobs(im, rois):
         blobs['rois'] = _get_rois_blob(rois, im_scale_factors)
     return blobs, im_scale_factors
 
-def im_detect(net, im, boxes=None):
+def im_detect(net, im, wins=None):
     """Detect object classes in an image given object proposals.
 
     Arguments:
         net (caffe.Net): Fast R-CNN network to use
         im (ndarray): color image to test (in BGR order)
-        boxes (ndarray): R x 4 array of object proposals or None (for RPN)
+        wins (ndarray): R x 4 array of object proposals or None (for RPN)
 
     Returns:
         scores (ndarray): R x K array of object class scores (K includes
             background as object category 0)
-        boxes (ndarray): R x (4*K) array of predicted bounding boxes
+        wins (ndarray): R x (4*K) array of predicted bounding wins
     """
-    blobs, im_scales = _get_blobs(im, boxes)
+    blobs, im_scales = _get_blobs(im, wins)
 
     # When mapping from image ROIs to feature map ROIs, there's some aliasing
     # (some distinct image ROIs get mapped to the same feature ROI).
@@ -130,7 +132,7 @@ def im_detect(net, im, boxes=None):
         _, index, inv_index = np.unique(hashes, return_index=True,
                                         return_inverse=True)
         blobs['rois'] = blobs['rois'][index, :]
-        boxes = boxes[index, :]
+        wins = wins[index, :]
 
     if cfg.TEST.HAS_RPN:
         im_blob = blobs['data']
@@ -157,7 +159,7 @@ def im_detect(net, im, boxes=None):
         assert len(im_scales) == 1, "Only single-image batch implemented"
         rois = net.blobs['rois'].data.copy()
         # unscale back to raw image space
-        boxes = rois[:, 1:5] / im_scales[0]
+        wins = rois[:, 1:3] / im_scales[0]
 
     if cfg.TEST.SVM:
         # use the raw scores before softmax under the assumption they
@@ -169,68 +171,68 @@ def im_detect(net, im, boxes=None):
 
     if cfg.TEST.BBOX_REG:
         # Apply bounding-box regression deltas
-        box_deltas = blobs_out['bbox_pred']
-        pred_boxes = bbox_transform_inv(boxes, box_deltas)
-        pred_boxes = clip_boxes(pred_boxes, im.shape)
+        box_deltas = blobs_out['twin_pred']
+        pred_wins = twin_transform_inv(wins, box_deltas)
+        pred_wins = clip_wins(pred_wins, im.shape)
     else:
-        # Simply repeat the boxes, once for each class
-        pred_boxes = np.tile(boxes, (1, scores.shape[1]))
+        # Simply repeat the wins, once for each class
+        pred_wins = np.tile(wins, (1, scores.shape[1]))
 
     if cfg.DEDUP_BOXES > 0 and not cfg.TEST.HAS_RPN:
-        # Map scores and predictions back to the original set of boxes
+        # Map scores and predictions back to the original set of wins
         scores = scores[inv_index, :]
-        pred_boxes = pred_boxes[inv_index, :]
+        pred_wins = pred_wins[inv_index, :]
 
-    return scores, pred_boxes
+    return scores, pred_wins
 
 def vis_detections(im, class_name, dets, thresh=0.3):
     """Visual debugging of detections."""
     import matplotlib.pyplot as plt
     im = im[:, :, (2, 1, 0)]
     for i in xrange(np.minimum(10, dets.shape[0])):
-        bbox = dets[i, :4]
+        twin = dets[i, :2]
         score = dets[i, -1]
         if score > thresh:
             plt.cla()
             plt.imshow(im)
             plt.gca().add_patch(
-                plt.Rectangle((bbox[0], bbox[1]),
-                              bbox[2] - bbox[0],
-                              bbox[3] - bbox[1], fill=False,
+                plt.Rectangle((twin[0], twin[1]),
+                              twin[2] - twin[0],
+                              twin[3] - twin[1], fill=False,
                               edgecolor='g', linewidth=3)
                 )
             plt.title('{}  {:.3f}'.format(class_name, score))
             plt.show()
 
-def apply_nms(all_boxes, thresh):
-    """Apply non-maximum suppression to all predicted boxes output by the
+def apply_nms(all_wins, thresh):
+    """Apply non-maximum suppression to all predicted wins output by the
     test_net method.
     """
-    num_classes = len(all_boxes)
-    num_images = len(all_boxes[0])
-    nms_boxes = [[[] for _ in xrange(num_images)]
+    num_classes = len(all_wins)
+    num_images = len(all_wins[0])
+    nms_wins = [[[] for _ in xrange(num_images)]
                  for _ in xrange(num_classes)]
     for cls_ind in xrange(num_classes):
         for im_ind in xrange(num_images):
-            dets = all_boxes[cls_ind][im_ind]
+            dets = all_wins[cls_ind][im_ind]
             if dets == []:
                 continue
-            # CPU NMS is much faster than GPU NMS when the number of boxes
+            # CPU NMS is much faster than GPU NMS when the number of wins
             # is relative small (e.g., < 10k)
             # TODO(rbg): autotune NMS dispatch
             keep = nms(dets, thresh, force_cpu=True)
             if len(keep) == 0:
                 continue
-            nms_boxes[cls_ind][im_ind] = dets[keep, :].copy()
-    return nms_boxes
+            nms_wins[cls_ind][im_ind] = dets[keep, :].copy()
+    return nms_wins
 
 def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
     """Test a Fast R-CNN network on an image database."""
     num_images = len(imdb.image_index)
     # all detections are collected into:
-    #    all_boxes[cls][image] = N x 5 array of detections in
-    #    (x1, y1, x2, y2, score)
-    all_boxes = [[[] for _ in xrange(num_images)]
+    #    all_wins[cls][image] = N x 2 array of detections in
+    #    (x1, x2, score)
+    all_wins = [[[] for _ in xrange(num_images)]
                  for _ in xrange(imdb.num_classes)]
 
     output_dir = get_output_dir(imdb, net)
@@ -242,7 +244,7 @@ def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
         roidb = imdb.roidb
 
     for i in xrange(num_images):
-        # filter out any ground truth boxes
+        # filter out any ground truth wins
         if cfg.TEST.HAS_RPN:
             box_proposals = None
         else:
@@ -251,11 +253,11 @@ def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
             # detection on the *non*-ground-truth rois. We select those the rois
             # that have the gt_classes field set to 0, which means there's no
             # ground truth.
-            box_proposals = roidb[i]['boxes'][roidb[i]['gt_classes'] == 0]
+            box_proposals = roidb[i]['wins'][roidb[i]['gt_classes'] == 0]
 
         im = cv2.imread(imdb.image_path_at(i))
         _t['im_detect'].tic()
-        scores, boxes = im_detect(net, im, box_proposals)
+        scores, wins = im_detect(net, im, box_proposals)
         _t['im_detect'].toc()
 
         _t['misc'].tic()
@@ -263,24 +265,24 @@ def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
         for j in xrange(1, imdb.num_classes):
             inds = np.where(scores[:, j] > thresh)[0]
             cls_scores = scores[inds, j]
-            cls_boxes = boxes[inds, j*4:(j+1)*4]
-            cls_dets = np.hstack((cls_boxes, cls_scores[:, np.newaxis])) \
+            cls_wins = wins[inds, j*2:(j+1)*2]
+            cls_dets = np.hstack((cls_wins, cls_scores[:, np.newaxis])) \
                 .astype(np.float32, copy=False)
             keep = nms(cls_dets, cfg.TEST.NMS)
             cls_dets = cls_dets[keep, :]
             if vis:
                 vis_detections(im, imdb.classes[j], cls_dets)
-            all_boxes[j][i] = cls_dets
+            all_wins[j][i] = cls_dets
 
         # Limit to max_per_image detections *over all classes*
         if max_per_image > 0:
-            image_scores = np.hstack([all_boxes[j][i][:, -1]
+            image_scores = np.hstack([all_wins[j][i][:, -1]
                                       for j in xrange(1, imdb.num_classes)])
             if len(image_scores) > max_per_image:
                 image_thresh = np.sort(image_scores)[-max_per_image]
                 for j in xrange(1, imdb.num_classes):
-                    keep = np.where(all_boxes[j][i][:, -1] >= image_thresh)[0]
-                    all_boxes[j][i] = all_boxes[j][i][keep, :]
+                    keep = np.where(all_wins[j][i][:, -1] >= image_thresh)[0]
+                    all_wins[j][i] = all_wins[j][i][keep, :]
         _t['misc'].toc()
 
         print 'im_detect: {:d}/{:d} {:.3f}s {:.3f}s' \
@@ -289,7 +291,7 @@ def test_net(net, imdb, max_per_image=100, thresh=0.05, vis=False):
 
     det_file = os.path.join(output_dir, 'detections.pkl')
     with open(det_file, 'wb') as f:
-        cPickle.dump(all_boxes, f, cPickle.HIGHEST_PROTOCOL)
+        cPickle.dump(all_wins, f, cPickle.HIGHEST_PROTOCOL)
 
     print 'Evaluating detections'
-    imdb.evaluate_detections(all_boxes, output_dir)
+    imdb.evaluate_detections(all_wins, output_dir)
