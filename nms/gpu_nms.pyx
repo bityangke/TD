@@ -3,6 +3,8 @@
 # Copyright (c) 2015 Microsoft
 # Licensed under The MIT License [see LICENSE for details]
 # Written by Ross Girshick
+# TD-CNN
+# Modified by Huijuan Xu
 # --------------------------------------------------------
 
 import numpy as np
@@ -21,7 +23,7 @@ def gpu_nms(np.ndarray[np.float32_t, ndim=2] dets, np.float thresh,
     cdef np.ndarray[np.int32_t, ndim=1] \
         keep = np.zeros(boxes_num, dtype=np.int32)
     cdef np.ndarray[np.float32_t, ndim=1] \
-        scores = dets[:, 4]
+        scores = dets[:, 2]
     cdef np.ndarray[np.int_t, ndim=1] \
         order = scores.argsort()[::-1]
     cdef np.ndarray[np.float32_t, ndim=2] \
